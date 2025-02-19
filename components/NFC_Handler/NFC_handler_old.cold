@@ -1,0 +1,627 @@
+#include <stdio.h>
+#include <stdbool.h>
+#include <stdlib.h>
+
+#include "NFC_handler.h"
+#include "NFC_reader.h"
+
+#define NFC_HANDLER_DEBUG_EN 0
+//#define NFC_HANDLER_DEBUG_ALL_EN 0
+
+#define RETRYCOUNT 5
+
+#define MAXERRORREADING 3
+
+#ifdef NFC_HANDLER_DEBUG_EN
+#define NFC_HANDLER_DEBUG(tag, fmt, ...)                        \
+  do                                                            \
+  {                                                             \
+    if (tag && *tag)                                            \
+    {                                                           \
+      printf("\x1B[32m[%s]D:\x1B[0m " fmt, tag, ##__VA_ARGS__); \
+      fflush(stdout);                                           \
+    }                                                           \
+    else                                                        \
+    {                                                           \
+      printf(fmt, ##__VA_ARGS__);                               \
+    }                                                           \
+  } while (0)
+#else
+#define NFC_HANDLER_DEBUG(fmt, ...)
+#endif
+
+#ifdef NFC_HANDLER_DEBUG_ALL_EN
+#define NFC_HANDLER_ALL_DEBUG(tag, fmt, ...)                     \
+  do                                                             \
+  {                                                              \
+    if (tag && *tag)                                             \
+    {                                                            \
+      printf("\x1B[31m[%s]DA:\x1B[0m " fmt, tag, ##__VA_ARGS__); \
+      fflush(stdout);                                            \
+    }                                                            \
+    else                                                         \
+    {                                                            \
+      printf(fmt, ##__VA_ARGS__);                                \
+    }                                                            \
+  } while (0)
+#else
+#define NFC_HANDLER_ALL_DEBUG(fmt, ...)
+#endif
+
+#define _STRINGIFY(s) #s
+#define STRINGIFY(s) _STRINGIFY(s)
+#define PocetPokusu 5
+
+/************************************************/
+/*!
+    @brief  Inicializace Handleru NFC struktury
+
+    @param  aHandlerData  Pointer na THandlerData strukturu
+    @param  aCapacity Velikost čipu v Bytech
+
+    @returns 0 - NFC Handler se nainicializoval a nastavil
+*/
+/**************************************************************************/
+uint8_t NFC_Handler_Init(THandlerData* aHandlerData,pn532_t aNFC)
+{
+  static const char *TAGin = "NFC_Handler_Init";
+  NFC_HANDLER_DEBUG(TAGin, "Inicializuji data k Handleru.\n");
+  aHandlerData->sNFC = aNFC;
+  aHandlerData->sRecipeStepIndexArray = NULL;
+  aHandlerData->sRecipeStepIndexArraySize = 0;
+  aHandlerData->sDataNeedSync = NULL;
+  NFC_InitTCardInfo(&aHandlerData->sCardInfo);
+  NFC_HANDLER_DEBUG(TAGin, "Data se nainicializovala.\n");
+
+  return 0;
+}
+
+/**************************************************************************/
+/*!
+    @brief  Nacteni dat z Handleru NFC struktury
+
+    @param  aHandlerData  Pointer na THandlerData strukturu
+
+
+    @returns 0 - Data se spravne nacetla z karty, 1 - Data nelze nacist/nebyla prilozena karta, 2 - Nelze autentizovat NFC tag, 3 - Nebyla nactena struktura TRecipeInfo, 4 - Nelze Alokovat pole, 5 - Nebylo vytvoreno pole pro data ,20 - Neocekavana chyba
+*/
+/**************************************************************************/
+uint8_t NFC_Handler_Load(THandlerData *aHandlerData)
+{
+  static const char *TAGin = "NFC_Handler_Load";
+  NFC_HANDLER_DEBUG(TAGin, "Nacitam kartu...\n");
+  size_t Error = 0;
+  for (size_t i = 0; i < MAXERRORREADING; ++i)
+  {
+    Error = NFC_LoadAllData(&aHandlerData->sNFC, &aHandlerData->sCardInfo);
+    if (Error == 0)
+      break;
+  }
+  switch (Error)
+  {
+  case 0:
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Data se nacetla.\n");
+    return 0;
+    break;
+  case 1:
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Data nelze nacist/nebyla prilozena karta.\n");
+    return 1;
+    break;
+  case 2:
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Nelze autentizovat NFC tag.\n");
+    return 2;
+    break;
+  case 3:
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Nebyla nactena struktura TRecipeInfo.\n");
+    return 3;
+    break;
+  case 4:
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Nelze Alokovat pole.\n");
+    return 4;
+    break;
+  case 5:
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Nebylo vytvoreno pole pro data.\n");
+    return 5;
+    break;
+
+  default:
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Neocekavana chyba.\n");
+    return 20;
+    break;
+  }
+}
+
+/**************************************************************************/
+/*!
+    @brief  Zapsani dat do pole dat k Zapsani na NFC cip
+
+    @param  aHandlerData  Pointer na THandlerData strukturu
+    @param  aData    Data pro zapsani do na nfc cip
+    @param  aIndex   Index dat k zapsani na nfc cip
+    @param  aCheckForIncluded   false - nebude kontrolovat jestli jsou data stejne na nfc cipu
+
+    @returns 0 - Hodnota se zapsala do docasneho pole hodnot k zapsani 1 - Hodnota se nezmeni, 2 - hodnoty jsou mimo rozsah 10 - Nelze upravit pole pro indexy, 11- Nelze upravit pole pro data, 20 - Data se vymazala z needSync protože se zmenili na stejne co jsou na cipu.
+*/
+/**************************************************************************/
+uint8_t NFC_Handler_Write(THandlerData *aHandlerData, TRecipeStep aData, size_t aIndex, bool aCheckForIncluded)
+{
+  static const char *TAGin = "NFC_Handler_Write";
+  if (aHandlerData->sCardInfo.sRecipeInfo.RecipeSteps < aIndex)
+  {
+    NFC_HANDLER_DEBUG(TAGin, "Prvek je jiz mimo hodnoty\n");
+    return 2;
+  }
+  NFC_HANDLER_DEBUG(TAGin, "Davam do pole NeedSync data s indexem: %zu\n", aIndex);
+  bool iIdentical = true;
+  bool iIncludedAlready = false;
+  size_t position = 0;
+  NFC_HANDLER_ALL_DEBUG(TAGin, "Zapisuji index: %zu s daty %x ... %x.\n", aIndex, ((uint8_t *)&aData)[0], ((uint8_t *)&aData)[TRecipeStep_Size - 1]);
+
+  for (size_t i = 0; i < aHandlerData->sRecipeStepIndexArraySize; i++)
+  {
+    if ((aHandlerData->sRecipeStepIndexArray)[i] == aIndex)
+    {
+      NFC_HANDLER_ALL_DEBUG(TAGin, "aIndex jiz existuje.\n");
+      iIncludedAlready = true;
+      iIdentical = true;
+      position = i;
+      break;
+    }
+  }
+  if (aCheckForIncluded)
+  {
+    for (size_t i = 0; i < TRecipeStep_Size; ++i)
+    {
+      if (((uint8_t *)(aHandlerData->sCardInfo.sRecipeStep) + aIndex * TRecipeStep_Size)[i] != ((uint8_t *)&aData)[i])
+      {
+        NFC_HANDLER_ALL_DEBUG(TAGin, "Hodnoty se v poli lisi.\n");
+        iIdentical = false;
+        break;
+      }
+    }
+  }
+  else
+  {
+    iIdentical = false;
+  }
+  if (iIdentical && !iIncludedAlready)
+  {
+    NFC_HANDLER_DEBUG(TAGin, "Hodnoty jsou stejne jako jsou jiz na cipu.\n");
+    
+    return 1;
+  }
+  else if (iIdentical && iIncludedAlready)
+  {
+    NFC_HANDLER_DEBUG(TAGin, "Hodnoty byly v NeedSync, ale zmenili se na hodnotu, ktera je jiz na cipu.\n");
+    --aHandlerData->sRecipeStepIndexArraySize;
+    if (aHandlerData->sRecipeStepIndexArraySize > 0)
+    {
+      for (size_t i = position; i < aHandlerData->sRecipeStepIndexArraySize ; ++i)
+      {
+        aHandlerData->sRecipeStepIndexArray[i] = aHandlerData->sRecipeStepIndexArray[i + 1];
+        for (size_t j = 0; j < TRecipeStep_Size; ++j)
+        {
+          ((uint8_t *)aHandlerData->sDataNeedSync + TRecipeStep_Size * i)[j] = ((uint8_t *)aHandlerData->sDataNeedSync + TRecipeStep_Size * (i+1))[j];
+        }
+      }
+    }
+    else
+    {
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Uvolnuji alokovanou pamet pro NeedsyncIndexArray a sDataNeedSync\n");
+      free(aHandlerData->sRecipeStepIndexArray);
+      free(aHandlerData->sDataNeedSync);
+      aHandlerData->sRecipeStepIndexArray = NULL;
+      aHandlerData->sDataNeedSync = NULL;
+    }
+    return 20;
+  }
+  else
+  {
+    if (iIncludedAlready)
+    {
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Kopiruju data do exist indexu %zu:", aHandlerData->sRecipeStepIndexArraySize - 1);
+      for (size_t i = 0; i < TRecipeStep_Size; ++i)
+      {
+        ((uint8_t *)aHandlerData->sDataNeedSync + TRecipeStep_Size * (position))[i] = ((uint8_t *)&aData)[i];
+        NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t *)aHandlerData->sDataNeedSync + TRecipeStep_Size * (position))[i]);
+      }
+      NFC_HANDLER_ALL_DEBUG("", "\n");
+    }
+    else
+    {
+      ++aHandlerData->sRecipeStepIndexArraySize;
+      size_t *TempArray = realloc(aHandlerData->sRecipeStepIndexArray, sizeof(size_t) * aHandlerData->sRecipeStepIndexArraySize);
+      if (!TempArray)
+      {
+        NFC_HANDLER_DEBUG(TAGin, "Pole NeedSyncIndex nelze zvetsit.\n");
+        return 10;
+      }
+
+      TRecipeStep *tempData = realloc(aHandlerData->sDataNeedSync, TRecipeStep_Size * aHandlerData->sRecipeStepIndexArraySize);
+      if (!tempData)
+      {
+        NFC_HANDLER_DEBUG(TAGin, "Pole DataNeedSync nelze zvetsit.\n");
+        return 11;
+      }
+      aHandlerData->sDataNeedSync = tempData;
+      aHandlerData->sRecipeStepIndexArray = TempArray;
+      aHandlerData->sRecipeStepIndexArray[aHandlerData->sRecipeStepIndexArraySize - 1] = aIndex;
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Kopiruju data do indexu na poz %zu,(hodnota indexu %zu):", aHandlerData->sRecipeStepIndexArraySize - 1,aHandlerData->sRecipeStepIndexArray[aHandlerData->sRecipeStepIndexArraySize - 1]);
+      for (size_t i = 0; i < TRecipeStep_Size; ++i)
+      {
+        ((uint8_t *)aHandlerData->sDataNeedSync + TRecipeStep_Size * (aHandlerData->sRecipeStepIndexArraySize - 1))[i] = ((uint8_t *)&aData)[i];
+        NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t *)aHandlerData->sDataNeedSync + TRecipeStep_Size * (aHandlerData->sRecipeStepIndexArraySize - 1))[i]);
+      }
+      NFC_HANDLER_ALL_DEBUG("", "\n");
+    }
+  }
+
+  return 0;
+}
+
+/**************************************************************************/
+/*!
+    @brief  Synchronizace dat k zapsaní do NFC čipu
+
+    @param  aHandlerData  Pointer na THandlerData strukturu
+
+    @returns 0 - uspesne se synchronizovalo. 1 - chyba indexovani 2 - Nebylo možné zapsat na kartu 5x, 10 - nejsou zadna data k synchronizaci, 11 - karta neni prilozena
+*/
+/**************************************************************************/
+uint8_t NFC_Handler_Sync(THandlerData *aHandlerData)
+{
+  static const char *TAGin = "NFC_Handler_Sync";
+  if (aHandlerData->sRecipeStepIndexArraySize > 0)
+  {
+    if (NFC_isCardReady(&aHandlerData->sNFC))
+    {
+      TCardInfo iTemp = {0};
+
+      iTemp.sRecipeStep = (TRecipeStep *)malloc(TRecipeStep_Size * aHandlerData->sCardInfo.sNumOfBlocks);
+      iTemp.sSize = aHandlerData->sCardInfo.sSize;
+      iTemp.sNumOfBlocks = aHandlerData->sCardInfo.sNumOfBlocks;
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Vytvařim docasnou promenou pro zapisovani.\n");
+      for (size_t i = 0; i < aHandlerData->sCardInfo.sNumOfBlocks; ++i)
+      {
+        NFC_HANDLER_ALL_DEBUG(TAGin, "data %zu:  ", i);
+        for (size_t j = 0; j < TRecipeStep_Size; ++j)
+        {
+          ((uint8_t *)(iTemp.sRecipeStep) + i * TRecipeStep_Size)[j] = ((uint8_t *)(aHandlerData->sCardInfo.sRecipeStep) + i * TRecipeStep_Size)[j];
+          NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t *)(iTemp.sRecipeStep) + i * TRecipeStep_Size)[j]);
+        }
+        NFC_HANDLER_ALL_DEBUG("", "\n");
+      }
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Nahravam do temp promene upravene data.\n");
+      /*for (size_t i = aHandlerData->sRecipeStepIndexArraySize; i > 0; --i)
+      {
+        NFC_HANDLER_ALL_DEBUG(TAGin, "Data(Pos: %zu)%zu: ", (i - 1), aHandlerData->sRecipeStepIndexArray[(i - 1)]);
+        for (size_t j = 0; j < TRecipeStep_Size; ++j)
+        {
+          //((uint8_t *)(iTemp.sRecipeStep) + aHandlerData->sRecipeStepIndexArray[(i - 1)] * TRecipeStep_Size)[j] = ((uint8_t *)(aHandlerData->sDataNeedSync + (i - 1) * TRecipeStep_Size))[j];
+          NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t *)(aHandlerData->sDataNeedSync + (i - 1) * TRecipeStep_Size))[j]);
+        }
+        NFC_HANDLER_ALL_DEBUG("", "\n");
+      }*/
+      for (size_t i = 0; i < aHandlerData->sRecipeStepIndexArraySize; i++)
+      {
+        NFC_HANDLER_ALL_DEBUG(TAGin, "Data %zu:", aHandlerData->sRecipeStepIndexArray[i]);
+        for (size_t k = 0; k < TRecipeStep_Size; k++)
+        {
+          ((uint8_t*)(iTemp.sRecipeStep)+aHandlerData->sRecipeStepIndexArray[i]*TRecipeStep_Size)[k] = ((uint8_t *)aHandlerData->sDataNeedSync + i * TRecipeStep_Size)[k];
+          NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t*)(iTemp.sRecipeStep)+aHandlerData->sRecipeStepIndexArray[i]*TRecipeStep_Size)[k]);
+        }
+        NFC_HANDLER_ALL_DEBUG("", "\n");
+      }
+
+      bool iAll = true;
+      for (size_t i = aHandlerData->sRecipeStepIndexArraySize; i > 0; --i)
+      {
+
+        NFC_HANDLER_ALL_DEBUG(TAGin, "Zkousim zapsat.\n");
+        size_t aTryedCount = 0;
+        while (aTryedCount < RETRYCOUNT)
+        {
+          NFC_HANDLER_ALL_DEBUG(TAGin, "Data z indexu:%zu .\n", aHandlerData->sRecipeStepIndexArray[(i - 1)]);
+          uint8_t aSucces = NFC_WriteAndCheck(&aHandlerData->sNFC, &iTemp, aHandlerData->sRecipeStepIndexArray[(i - 1)]);
+          if (aSucces == 0)
+          {
+            NFC_HANDLER_ALL_DEBUG(TAGin, "Hodnoty se zapsali.\n");
+
+            break;
+          }
+          else if (aSucces == 1 || aSucces == 3 || aSucces == 4)
+          {
+            NFC_HANDLER_ALL_DEBUG(TAGin, "Hodnoty se lisi nebo nesli zapsat.\n");
+            ++aTryedCount;
+          }
+          else
+          {
+            NFC_HANDLER_ALL_DEBUG(TAGin, "Jina chyba.\n");
+            return 1;
+          }
+        }
+        if (aTryedCount >= RETRYCOUNT)
+        {
+          NFC_HANDLER_DEBUG(TAGin, "Pocet pokusu presahl max hranici.\n");
+          iAll = false;
+          break;
+        }
+        --aHandlerData->sRecipeStepIndexArraySize;
+        if (aHandlerData->sRecipeStepIndexArraySize > 0)
+        {
+          NFC_HANDLER_ALL_DEBUG(TAGin, "Zmensuji pole.\n");
+          for (size_t k = i; k < aHandlerData->sRecipeStepIndexArraySize - 1; ++k)
+          {
+            aHandlerData->sRecipeStepIndexArray[k] = aHandlerData->sRecipeStepIndexArray[k + 1];
+            for (size_t j = 0; j < TRecipeStep_Size; ++j)
+            {
+              ((uint8_t *)aHandlerData->sDataNeedSync + TRecipeStep_Size * k)[j] = ((uint8_t *)aHandlerData->sDataNeedSync + TRecipeStep_Size * (k + 1))[j];
+            }
+          }
+        }
+        else
+        {
+
+          NFC_HANDLER_ALL_DEBUG(TAGin, "Uvolnuji pole, protoze pocet veci v poli je 0:%zu.\n", aHandlerData->sRecipeStepIndexArraySize);
+          free(aHandlerData->sRecipeStepIndexArray);
+          free(aHandlerData->sDataNeedSync);
+          aHandlerData->sRecipeStepIndexArray = NULL;
+          aHandlerData->sDataNeedSync = NULL;
+        }
+      }
+      if (!iAll)
+      {
+        NFC_HANDLER_DEBUG(TAGin, "Vsechny data se nenahrala.\n");
+        NFC_HANDLER_ALL_DEBUG(TAGin, "Zustala s indexem: ");
+        for (size_t i = 0; i < aHandlerData->sRecipeStepIndexArraySize; ++i)
+        {
+          NFC_HANDLER_ALL_DEBUG("", "%zu ", aHandlerData->sRecipeStepIndexArray[i]);
+          for (size_t j = 0; j < TRecipeStep_Size; ++j)
+          {
+            ((uint8_t *)(iTemp.sRecipeStep) + aHandlerData->sRecipeStepIndexArray[i] * TRecipeStep_Size)[j] = ((uint8_t *)(aHandlerData->sCardInfo.sRecipeStep) + aHandlerData->sRecipeStepIndexArray[i] * TRecipeStep_Size)[j];
+          }
+        }
+        NFC_HANDLER_ALL_DEBUG("", "\n");
+      }
+      else
+      {
+        NFC_HANDLER_DEBUG(TAGin, "Vsechny data se nahrala a overila.\n");
+        NFC_HANDLER_ALL_DEBUG(TAGin, "Kopiruji do vnitrni pameti. \n");
+      }
+      for (size_t i = 0; i < aHandlerData->sCardInfo.sNumOfBlocks; ++i)
+      {
+        NFC_HANDLER_ALL_DEBUG(TAGin, "data %zu:  ", i);
+        for (size_t j = 0; j < TRecipeStep_Size; ++j)
+        {
+          ((uint8_t *)(aHandlerData->sCardInfo.sRecipeStep) + i * TRecipeStep_Size)[j] = ((uint8_t *)(iTemp.sRecipeStep) + i * TRecipeStep_Size)[j];
+          NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t *)(aHandlerData->sCardInfo.sRecipeStep) + i * TRecipeStep_Size)[j]);
+        }
+        NFC_HANDLER_ALL_DEBUG("", "\n");
+      }
+
+      if (!iAll)
+      {
+        NFC_HANDLER_DEBUG(TAGin, "Data, ktera se nahrala se uspesne prekopirovala do vnitrni pameti.\n");
+        return 2;
+      }
+      else
+      {
+        NFC_HANDLER_DEBUG(TAGin, "Vsechna data se prekopirovala do vnitrni pameti.\n");
+        return 0;
+      }
+    }
+    else
+    {
+      NFC_HANDLER_DEBUG(TAGin, "Karta neni prilozena.\n");
+      return 11;
+    }
+  }
+  NFC_HANDLER_DEBUG(TAGin, "Pole hodnot k synchronizaci je prázdné.\n");
+  return 10;
+}
+
+/**************************************************************************/
+/*!
+    @brief  Bezpecne zapsani dat do NFC Cipu
+
+    @param  aHandlerData  Pointer na THandlerData strukturu
+    @param  aData    Data pro zapsani do na nfc cip
+    @param  aIndex   Index dat k zapsani na nfc cip
+
+    @returns 0 - Hodnota se spravne zapsala, 1 - Nelze zapsat, 2 - jina chyba, 10 - hodnota aIndex mimo data,11 - karta neni prilozena
+*/
+/**************************************************************************/
+uint8_t NFC_Handler_WriteSafe(THandlerData *aHandlerData, TRecipeStep aData, size_t aIndex)
+{
+  static const char *TAGin = "NFC_Handler_WriteSafe";
+  if (aIndex < aHandlerData->sCardInfo.sNumOfBlocks)
+  {
+    if (NFC_isCardReady(&aHandlerData->sNFC))
+    {
+      TCardInfo iTemp = {0};
+
+      iTemp.sRecipeStep = (TRecipeStep *)malloc(TRecipeStep_Size * aHandlerData->sCardInfo.sNumOfBlocks);
+      iTemp.sSize = aHandlerData->sCardInfo.sSize;
+      iTemp.sNumOfBlocks = aHandlerData->sCardInfo.sNumOfBlocks;
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Vytvarim docasnou promenou pro zapisovani.\n");
+      for (size_t i = 0; i < aHandlerData->sCardInfo.sNumOfBlocks; ++i)
+      {
+        NFC_HANDLER_ALL_DEBUG(TAGin, "data %zu:  ", i);
+        for (size_t j = 0; j < TRecipeStep_Size; ++j)
+        {
+          ((uint8_t *)(iTemp.sRecipeStep) + i * TRecipeStep_Size)[j] = ((uint8_t *)(aHandlerData->sCardInfo.sRecipeStep) + i * TRecipeStep_Size)[j];
+          NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t *)(iTemp.sRecipeStep) + i * TRecipeStep_Size)[j]);
+        }
+        NFC_HANDLER_ALL_DEBUG("", "\n");
+      }
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Nahravam do temp promene upravene data.\n");
+
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Data %zu: ", aIndex);
+      for (size_t j = 0; j < TRecipeStep_Size; ++j)
+      {
+        ((uint8_t *)(iTemp.sRecipeStep) + aIndex * TRecipeStep_Size)[j] = ((uint8_t *)(&aData))[j];
+        NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t *)(iTemp.sRecipeStep) + aIndex * TRecipeStep_Size)[j]);
+      }
+      NFC_HANDLER_ALL_DEBUG("", "\n");
+
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Zkousim zapsat.\n");
+      size_t aTryedCount = 0;
+      while (aTryedCount < RETRYCOUNT)
+      {
+        NFC_HANDLER_ALL_DEBUG(TAGin, "Data z indexu:%zu .\n", aIndex);
+        uint8_t aSucces = NFC_WriteAndCheck(&aHandlerData->sNFC, &iTemp, aIndex);
+        if (aSucces == 0)
+        {
+          NFC_HANDLER_ALL_DEBUG(TAGin, "Hodnoty se zapsali.\n");
+          break;
+        }
+        else if (aSucces == 1 || aSucces == 3 || aSucces == 4)
+        {
+          NFC_HANDLER_ALL_DEBUG(TAGin, "Hodnoty se lisi nebo nesli zapsat.\n");
+          ++aTryedCount;
+        }
+        else
+        {
+          NFC_HANDLER_ALL_DEBUG(TAGin, "Jina chyba.\n");
+          return 2;
+        }
+      }
+      if (aTryedCount >= RETRYCOUNT)
+      {
+        NFC_HANDLER_ALL_DEBUG(TAGin, "Pocet pokusu presahl max hranici.\n");
+        return 1;
+      }
+
+      NFC_HANDLER_DEBUG(TAGin, "Vsechny data se nahrala a overila.\n");
+      NFC_HANDLER_ALL_DEBUG(TAGin, "Kopiruji do vnitrni pameti. \n");
+
+      for (size_t i = 0; i < aHandlerData->sCardInfo.sNumOfBlocks; ++i)
+      {
+        NFC_HANDLER_ALL_DEBUG(TAGin, "data %zu:  ", i);
+        for (size_t j = 0; j < TRecipeStep_Size; ++j)
+        {
+          ((uint8_t *)(aHandlerData->sCardInfo.sRecipeStep) + i * TRecipeStep_Size)[j] = ((uint8_t *)(iTemp.sRecipeStep) + i * TRecipeStep_Size)[j];
+          NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t *)(aHandlerData->sCardInfo.sRecipeStep) + i * TRecipeStep_Size)[j]);
+        }
+        NFC_HANDLER_ALL_DEBUG("", "\n");
+      }
+      NFC_HANDLER_DEBUG(TAGin, "Vsechna data se prekopirovala do vnitrni pameti.\n");
+      return 0;
+    }
+    else
+    {
+      NFC_HANDLER_DEBUG(TAGin, "Karta neni prilozena.\n");
+      return 11;
+    }
+  }
+
+  else
+  {
+    NFC_HANDLER_DEBUG(TAGin, "Hodnota aIndex mimo rozsah struktury.\n");
+    return 10;
+  }
+}
+/**************************************************************************/
+/*!
+    @brief  Funkce na ziskani dat z SAFE NFC Struktury
+
+    @param  aHandlerData  Pointer na THandlerData strukturu
+    @param  aData    Pointer na data, kde se ma dostat hodnota z SAFE hodnot
+    @param  aIndex   Index dat k ziskani ze SAFE hodnot
+
+    @returns 0 - Hodnota se spravne nacetla. 10 - aIndex je mimo rozsah
+*/
+/**************************************************************************/
+uint8_t NFC_Handler_GetStructFromSafeData(THandlerData *aHandlerData, TRecipeStep *aData, size_t aIndex)
+{
+  static const char *TAGin = "NFC_Handler_GetStructFromSafeData";
+  if (aIndex < aHandlerData->sCardInfo.sNumOfBlocks)
+  {
+    NFC_HANDLER_ALL_DEBUG(TAGin, "data %zu:  ", aIndex);
+    for (size_t i = 0; i < TRecipeStep_Size; ++i)
+    {
+      ((uint8_t *)aData)[i] = ((uint8_t *)aHandlerData->sCardInfo.sRecipeStep + aIndex * TRecipeStep_Size)[i];
+      NFC_HANDLER_ALL_DEBUG("", "%x ", ((uint8_t *)aData)[i]);
+    }
+    NFC_HANDLER_ALL_DEBUG("", "\n");
+  }
+  else
+  {
+    NFC_HANDLER_DEBUG(TAGin, "Hodnota aIndex mimo rozsah struktury.\n");
+    return 10;
+  }
+  NFC_HANDLER_ALL_DEBUG(TAGin, "Koncim\n");
+  return 0;
+}
+/**************************************************************************/
+/*!
+    @brief  Funkce na ziskani vsech dat z SAFE NFC Struktury
+
+    @param  aHandlerData  Pointer na THandlerData strukturu
+    @param  aData    Pointer na data, kde se ma dostat hodnota z SAFE hodnot
+
+    @returns 0 - Hodnota se spravne nacetla. 1 - Pole se nemohlo naalokovat, 10 - Hodnota aIndex je mimo rozsah
+*/
+/**************************************************************************/
+uint8_t NFC_Handler_GetStructFromSafeDataAll(THandlerData *aHandlerData, TRecipeStep *aData)
+{
+  static const char *TAGin = "NFC_Handler_GetStructFromSafeDataAll";
+  TRecipeStep *iTempData = realloc(aData, TRecipeStep_Size * aHandlerData->sCardInfo.sNumOfBlocks);
+  if (!iTempData)
+  {
+    NFC_HANDLER_DEBUG(TAGin, "Pole se nemohlo naalokovat.\n");
+    return 10;
+  }
+  aData = iTempData;
+  for (size_t i = 0; i < aHandlerData->sCardInfo.sNumOfBlocks; ++i)
+  {
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Prvek pole %zu: \n", i);
+    uint8_t iValue = NFC_Handler_GetStructFromSafeData(aHandlerData, (aData + i), i);
+    if (iValue == 10)
+    {
+      NFC_HANDLER_DEBUG(TAGin, "Hodnota aIndex mimo rozsah struktury.\n");
+      return 10;
+    }
+  }
+  NFC_HANDLER_ALL_DEBUG(TAGin, "Koncim.\n");
+  return 0;
+}
+/**************************************************************************/
+/*!
+    @brief  Funkce zniceni vsech poli, ktere se mohli vytvorit
+
+    @param  aHandlerData  Pointer na THandlerData strukturu
+
+    @returns 0 - Hodnota se spravne odalokovali
+*/
+/**************************************************************************/
+uint8_t NFC_Handler_Destroy(THandlerData* aHandlerData)
+{
+  static const char *TAGin = "NFC_Handler_Destroy";
+  if(aHandlerData->sCardInfo.sRecipeStep)
+  {
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Uvolnuji aHandlerData->sCardInfo.sRecipeStep.\n");
+    free(aHandlerData->sCardInfo.sRecipeStep);
+    aHandlerData->sCardInfo.sRecipeStep = NULL;
+  }
+  
+  aHandlerData->sCardInfo.sNumOfBlocks = 0;
+  aHandlerData->sCardInfo.sSize = 0;
+  aHandlerData->sCardInfo.sUidLength = 0;
+  
+  aHandlerData->sRecipeStepIndexArraySize = 0;
+  if(aHandlerData->sRecipeStepIndexArray)
+  {
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Uvolnuji aHandlerData->sRecipeStepIndexArray.%p\n",aHandlerData->sRecipeStepIndexArray);
+    free(aHandlerData->sRecipeStepIndexArray);
+    aHandlerData->sRecipeStepIndexArray = NULL;
+  }
+  if(aHandlerData->sDataNeedSync)
+  {
+    NFC_HANDLER_ALL_DEBUG(TAGin, "Uvolnuji aHandlerData->sDataNeedSync.%p\n",aHandlerData->sDataNeedSync);
+    free(aHandlerData->sDataNeedSync);
+    aHandlerData->sDataNeedSync = NULL;
+  }
+  
+  return 0;
+}

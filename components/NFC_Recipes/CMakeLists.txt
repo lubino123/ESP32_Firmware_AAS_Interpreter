@@ -1,0 +1,10 @@
+set(COMPONENT_ADD_INCLUDEDIRS .)
+set(COMPONENT_SRCS "NFC_recipes.c")
+idf_component_register(SRCS "NFC_recipes.c"
+                       INCLUDE_DIRS "."
+                       INCLUDE_DIRS "."
+                       REQUIRES "NFC_Handler"
+                       REQUIRES "driver"
+                       REQUIRES "pn532"
+                       REQUIRES "neopixel"
+                       REQUIRES "OPC_Klient")
