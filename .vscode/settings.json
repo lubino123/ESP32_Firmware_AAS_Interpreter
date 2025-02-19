@@ -1,0 +1,42 @@
+{
+    "idf.adapterTargetName": "esp32s3",
+    "idf.flashType": "UART",
+    "idf.portWin": "COM8",
+    "files.associations": {
+        "esp_log_internal.h": "c",
+        "DES.h": "c",
+        "pn532.h": "c",
+        "stdint.h": "c",
+        "stddef.h": "c",
+        "stdlib.h": "c",
+        "array": "c",
+        "string": "c",
+        "string_view": "c",
+        "nfc_reader.h": "c",
+        "nfc_handler.h": "c",
+        "bitset": "c",
+        "algorithm": "c",
+        "freertos.h": "c",
+        "numbers": "c",
+        "crc.h": "c",
+        "stdbool.h": "c",
+        "nfc_recipes.h": "c",
+        "open62541.h": "c",
+        "adc.h": "c",
+        "esp_flash_encrypt.h": "c",
+        "opc_klient.h": "c",
+        "esp_event.h": "c",
+        "chrono": "c",
+        "esp_sntp.h": "c",
+        "functional": "c",
+        "task.h": "c",
+        "libtelnet.h": "c",
+        "server.h": "c",
+        "gpio.h": "c"
+    },
+    "idf.toolsPathWin": "c:\\Espressif\\frameworks\\esp-idf-v5.1.1-2",
+    "idf.espIdfPathWin": "C:\\Espressif\\frameworks\\esp-idf-v5.1.1-2",
+    "idf.openOcdConfigs": [
+        "board/esp32s3-builtin.cfg"
+    ]
+}
